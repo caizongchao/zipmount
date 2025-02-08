@@ -1,0 +1,15 @@
+*.exe
+*.dbg
+*.dll
+.xmake/
+.vscode/
+.vs/
+.fetch/
+build/
+debug/
+release/
+bin/
+deps/
+logs/
+temp/
+physfs/
