@@ -101,7 +101,13 @@ static struct ok_type {
     }
 
     template<typename T>
-    ok_type & operator()(T && s) { epilogue = true; print("{} ... ", s); return *this; }
+    ok_type & operator()(T && s) {
+        auto now = std::chrono::system_clock::now();
+        auto time_point = std::chrono::floor<std::chrono::seconds>(now);
+        auto time_of_day = std::chrono::hh_mm_ss {time_point - std::chrono::floor<std::chrono::days>(time_point)};
+
+        epilogue = true; print("[{:%T}] {} ... ", time_of_day, s); return *this;
+    }
 } ok;
 
 static struct {
@@ -163,16 +169,16 @@ static struct {
             string dname = fname + '/';
 
             index = mz_zip_reader_locate_file(&zipf, dname.c_str(), 0, 0); {
-                if(!(index < 0)) return {DIR, index};
+                if(!(index < 0)) return {DIR, index + 1};
 
                 index = mz_zip_reader_locate_dir(&zipf, dname.c_str(), 0, 0); {
                     if(!(index < 0)) {
-                        while(!(--index < 0)) {
-                            auto st = stat(index); {
-                                if(!st.fpath.starts_with(dname)) break;
+                        while(index > 0) {
+                            auto st = stat(index - 1); {
+                                if(!st.fpath.starts_with(dname)) break; else --index;
                             }
                         }
-                        
+
                         return {DIR, index};
                     }
                 }
@@ -203,10 +209,14 @@ static struct {
     template<typename F>
     void each(string const & fname, F && f) {
         auto ent = locate(fname); if(ent.is_dir()) {
-            auto findex = ent.index; auto is_root = (findex == -1);
+            auto findex = ent.index;
 
-            stat_t st; scan: while(++findex < this->size) {
-                st = stat(findex); string & fpath = st.fpath;
+            auto is_root = (findex == -1); if(is_root) {
+                ++findex;
+            }
+
+            stat_t st; scan: while(findex < this->size) {
+                st = stat(findex++); string & fpath = st.fpath;
 
                 if(!is_root && !fpath.starts_with(fname)) return;
 
@@ -229,8 +239,8 @@ static struct {
                     // skip this dir
                     dname = {fpath.data(), offset + dname.size() + 1};
 
-                    while(++findex < this->size) {
-                        auto st2 = stat(findex); {
+                    while(findex < this->size) {
+                        auto st2 = stat(findex++); {
                             if(st2.fpath.starts_with(dname)) continue;
                         }
 
@@ -290,9 +300,7 @@ static NTSTATUS DOKAN_CALLBACK zmCreateFile(LPCWSTR FileName, PDOKAN_IO_SECURITY
 static void DOKAN_CALLBACK zmCloseFile(LPCWSTR FileName, PDOKAN_FILE_INFO DokanFileInfo) {}
 
 static NTSTATUS DOKAN_CALLBACK zmReadFile(LPCWSTR FileName, LPVOID Buffer, DWORD BufferLength, LPDWORD ReadLength, LONGLONG Offset, PDOKAN_FILE_INFO DokanFileInfo) {
-    int findex = DokanFileInfo->Context; {
-        if(!findex) return STATUS_INVALID_PARAMETER;
-    }
+    int findex = DokanFileInfo->Context;
 
     auto s = $archive.read(findex);
 
@@ -322,9 +330,7 @@ static NTSTATUS DOKAN_CALLBACK zmGetFileInformation(LPCWSTR FileName, LPBY_HANDL
         HandleFileInformation->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY; return STATUS_SUCCESS;
     }
 
-    int findex = DokanFileInfo->Context; if(!findex) {
-        return STATUS_INVALID_PARAMETER;
-    }
+    int findex = DokanFileInfo->Context;
 
     auto stat = $archive.stat(findex); {
         FILETIME mtime = time64_to_filetime(stat.mtime);
@@ -400,23 +406,7 @@ int main(int argc, char ** argv) {
                 auto findex = ent.index; auto is_root = (findex == -1);
 
                 while(++findex < $archive.size) {
-                    auto st = $archive.stat(findex);
-
-                    print("{}", st.fpath);
-
-                    // string & fpath = st.fpath;
-
-                    // if(!is_root && !fpath.starts_with(fname)) continue;
-
-                    // auto offset = is_root ? 0 : fname.size(); if(fpath[offset] == '/') {
-                    //     ++offset;
-                    // }
-
-                    // if(fpath.find('/', offset) != string::npos) continue;
-
-                    // st.fpath = st.fpath.substr(offset);
-
-                    continue;
+                    auto st = $archive.stat(findex); print("{}", st.fpath); continue;
                 }
             }
 
@@ -443,6 +433,7 @@ int main(int argc, char ** argv) {
         DOKAN_OPTIONS dokanOptions {0}; {
             dokanOptions.Version = DOKAN_VERSION;
             dokanOptions.SingleThread = TRUE;
+            dokanOptions.Timeout = 3000 * 1000;
             dokanOptions.MountPoint = mount_point.c_str();
             dokanOptions.Options =
                 DOKAN_OPTION_REMOVABLE | DOKAN_OPTION_WRITE_PROTECT | DOKAN_OPTION_MOUNT_MANAGER;
@@ -458,7 +449,7 @@ int main(int argc, char ** argv) {
             dokanOperations.FindFiles = zmFindFiles;
         }
 
-        DokanInit();
+        DokanInit(); ok("ready, (CTRL + C) to quit");
 
         auto rc = DokanMain(&dokanOptions, &dokanOperations); switch(rc) {
             case DOKAN_SUCCESS: break;
