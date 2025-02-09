@@ -5,14 +5,12 @@ CompileFlags:
     Add:
         - "-std=c++23"
         - "-Iw:/projects/mimalloc/deps/mimalloc/include"
-        - "-Iphysfs/src"
         - "-Idokan/include/dokan"
         - "-Iatl/include"
         - "-D_CRT_SECURE_NO_WARNINGS"
         - '-D_WIN32'
         - '-D_WIN32_WINNT=0x0601'
-        - '-DPHYSFS_SUPPORTS_DEFAULT=1'
-        - '-DPHYSFS_SUPPORTS_ZIP=1'
+        - '-DNOMINMAX'
         - '-include windows.h'
         
 Diagnostics:

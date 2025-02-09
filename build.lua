@@ -20,7 +20,7 @@ local cc = ninja.target('cc')
     :type('phony')
     :define(public {
         debug and 'DEBUG' or 'NDEBUG', '_CRT_SECURE_NO_WARNINGS', '_CRT_NONSTDC_NO_WARNINGS', '_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS',
-        '_WIN32', '_WIN32_WINNT=0x0601',
+        '_WIN32', '_WIN32_WINNT=0x0601', 'NOMINMAX'
     })
     :c_flags(public { std = 'c11' })
     :cx_flags(public { '/arch:AVX', '/Z7', '/GS-', debug and '/Od' or '/O2' })
@@ -50,8 +50,10 @@ local zipmount = ninja.target('zipmount')
     :type('binary')
     :deps(libphysfs)
     :cxx_pch('stdafx.h')
+    :define('malloc=mi_malloc', 'free=mi_free', 'realloc=mi_realloc')
     :define('_ATL_NO_COM_SUPPORT'):include_dir('atl/include'):lib_dir('atl/lib/x64')
     :include_dir('dokan/include/dokan'):lib_dir('dokan/lib'):lib('dokan2.lib')
+    :src('miniz.c')
     :src('zipmount.cpp')
 
 ninja.watch(

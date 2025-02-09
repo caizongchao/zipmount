@@ -1,49 +1,200 @@
+#include "miniz.h"
 #include "stdafx.h"
+#include <algorithm>
+
+// a cache which evicts the least recently used item when it is full
+template<class Key, class Value>
+class lru_cache {
+public:
+    typedef Key key_type;
+    typedef Value value_type;
+    typedef std::list<key_type> list_type;
+    typedef std::pair<value_type, typename list_type::iterator> xvalue_type;
+    typedef std::map<key_type, xvalue_type> map_type;
+
+    lru_cache(size_t capacity) : m_capacity(capacity) {}
+
+    ~lru_cache() {}
+
+    size_t size() const { return m_map.size(); }
+
+    size_t capacity() const { return m_capacity; }
+
+    bool empty() const { return m_map.empty(); }
+
+    bool contains(const key_type & key) { return m_map.find(key) != m_map.end(); }
+
+    template<typename K, typename V>
+    void insert(K && key, V && value) {
+        typename map_type::iterator i = m_map.find(key); if(i == m_map.end()) {
+            // insert item into the cache, but first check if it is full
+            if(size() >= m_capacity) {
+                // cache is full, evict the least recently used item
+                evict();
+            }
+
+            // insert the new item
+            m_list.push_front(std::forward<K>(key));
+            m_map.emplace(std::forward<K>(key), xvalue_type {std::forward<V>(value), m_list.begin()});
+        }
+    }
+
+    const value_type * get(const key_type & key) {
+        // lookup value in the cache
+        typename map_type::iterator i = m_map.find(key);
+
+        if(i == m_map.end()) return nullptr;
+
+        // return the value, but first update its place in the most recently used list
+        typename list_type::iterator j = i->second.second; if(j != m_list.begin()) {
+            // move item to the front of the most recently used list
+            m_list.erase(j); m_list.push_front(key);
+
+            // update iterator in map
+            j = m_list.begin(); const value_type & value = i->second.first; {
+                m_map[key] = std::make_pair(value, j);
+            }
+
+            // return the value
+            return &value;
+        }
+        else {
+            // the item is already at the front of the most recently
+            // used list so just return it
+            return &i->second.first;
+        }
+    }
+
+    void clear() { m_map.clear(); m_list.clear(); }
+
+private:
+    void evict() {
+        // evict item from the end of most recently used list
+        typename list_type::iterator i = --m_list.end(); {
+            m_map.erase(*i); m_list.erase(i);
+        }
+    }
+
+private:
+    map_type m_map; list_type m_list; size_t m_capacity;
+};
 
 const char * APP_NAME = "zipmount";
 const char * APP_VERSION = "0.1.0";
 
-using namespace std; namespace fs = filesystem;
-using namespace ATL;
-
-using path = fs::path;
+using namespace std; using namespace ATL; namespace fs = filesystem; using fs::path;
 
 static struct ok_type {
-    string msg;
+    void failed(int rc = 1) { print("failed\n"); exit(rc); }
 
+    void succeeded() { print("ok\n"); }
+
+    template<typename T, std::enable_if_t<!std::is_same_v<T, bool>, int> = 0>
     ok_type & operator=(int rc) {
-        if(!rc) {
-            if(!msg.empty()) {
-                println("[failed] {}, code: ", msg, rc); msg.clear();
-            }
-            else {
-                println("[failed] code: {}", rc);
-            }
-
-            exit(rc);
-        }
-
-        return *this;
+        if(rc) failed(rc); else succeeded(); ; return *this;
     }
 
     ok_type & operator=(bool b) {
-        if(!b) {
-            if(!msg.empty()) {
-                println("[failed] {}", msg); msg.clear();
-            }
-            else {
-                println("[failed] code: false");
-            }
-
-            exit(1);
-        }
-
-        return *this;
+        if(!b) failed(); else succeeded(); ; return *this;
     }
 
     template<typename T>
-    ok_type & operator()(T && s) { msg = std::forward<T>(s); return *this; }
+    ok_type & operator()(T && s) { print("{} ... ", s); return *this; }
 } ok;
+
+static struct {
+    enum { NONE, FILE, DIR };
+
+    struct entry_t {
+        int type {0}; int index {0};
+
+        operator bool() const { return !type; }
+
+        bool is_file() const { return type == FILE; }
+
+        bool is_idr() const { return type == DIR; }
+    };
+
+    struct stat_t {
+        string fpath; size_t size; int64_t mtime; int type;
+
+        bool is_file() const { return type == FILE; }
+
+        bool is_dir() const { return type == DIR; }
+    };
+
+    mz_zip_archive zipf {0}; size_t size {0}; lru_cache<int, std::string> cache {128}; CAtlFileMappingBase fmapping;
+
+    int open(string const & fname) {
+        CAtlFile f; {
+            ok(format("open {}", fname)) =
+                f.Create(fname.c_str(), GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL);
+            ok = fmapping.MapFile(f);
+        }
+
+        ok("loading archive") =
+            mz_zip_reader_init_mem(&zipf, fmapping.GetData(), fmapping.GetMappingSize(), 0);
+
+        size = mz_zip_reader_get_num_files(&zipf);
+    }
+
+    stat_t stat(int findex) {
+        mz_zip_archive_file_stat st; ok = (mz_zip_reader_file_stat(&zipf, findex, &st) == MZ_TRUE);
+
+        stat_t r; {
+            r.fpath = st.m_filename; r.size = st.m_uncomp_size; r.mtime = st.m_time; r.type = (st.m_is_directory) ? DIR : FILE;
+        }
+
+        return r;
+    }
+
+    entry_t locate(string const & fname) {
+        auto index = mz_zip_reader_locate_file(&zipf, fname.c_str(), 0, 0); {
+            if(index < 0) return {};
+        }
+
+        return {stat(index).type, index};
+    }
+
+    const string * read(int findex) {
+        { // try cache first
+            auto r = cache.get(findex); if(r) {
+                return r;
+            }
+        }
+
+        auto st = stat(findex); std::string s(st.size, 0); {
+            ok = (mz_zip_reader_extract_to_mem(&zipf, findex, (void *)s.data(), s.size(), 0) == MZ_TRUE);
+        }
+
+        cache.insert(findex, std::move(s));
+
+        return read(findex);
+    }
+
+    template<typename F>
+    void each(string const & fname, F && f) {
+        auto [_, findex] = locate(fname); if(findex >= 0) {
+            while(findex < this->size) {
+                auto st = stat(findex++);
+
+                string & fpath = st.fpath;
+
+                if(fpath.starts_with(fname)) return;
+
+                auto offset = fname.size(); if(fpath[offset] == '/') {
+                    ++offset;
+                }
+
+                if(fpath.find('/', offset) != string::npos) return;
+
+                st.fpath = st.fpath.substr(offset);
+
+                f(st);
+            }
+        }
+    }
+} $archive;
 
 // fs callbacks
 static NTSTATUS DOKAN_CALLBACK zmCreateFile(LPCWSTR FileName, PDOKAN_IO_SECURITY_CONTEXT SecurityContext, ACCESS_MASK DesiredAccess, ULONG FileAttributes, ULONG ShareAccess, ULONG CreateDisposition, ULONG CreateOptions, PDOKAN_FILE_INFO DokanFileInfo) {
@@ -55,9 +206,11 @@ static NTSTATUS DOKAN_CALLBACK zmCreateFile(LPCWSTR FileName, PDOKAN_IO_SECURITY
 
     USES_CONVERSION;
 
-    auto fpath = W2A(path(FileName).generic_wstring().c_str());
+    string fpath = W2A(path(FileName).generic_wstring().c_str());
 
-    auto fname = fpath; if(!PHYSFS_exists(fname)) {
+    auto [ftype, findex] = $archive.locate(fpath);
+
+    auto fname = fpath; if(!ftype) {
         if((creationDisposition == CREATE_NEW) || (creationDisposition == OPEN_ALWAYS)) {
             return DokanNtStatusFromWin32(ERROR_ACCESS_DENIED);
         }
@@ -69,7 +222,7 @@ static NTSTATUS DOKAN_CALLBACK zmCreateFile(LPCWSTR FileName, PDOKAN_IO_SECURITY
         return DokanNtStatusFromWin32(ERROR_FILE_EXISTS);
     }
 
-    bool is_dir = PHYSFS_isDirectory(fname); if(is_dir) {
+    bool is_dir = (ftype == 2); if(is_dir) {
         DokanFileInfo->IsDirectory = TRUE;
 
         if(creationDisposition == OPEN_ALWAYS) return STATUS_OBJECT_NAME_COLLISION;
@@ -78,42 +231,39 @@ static NTSTATUS DOKAN_CALLBACK zmCreateFile(LPCWSTR FileName, PDOKAN_IO_SECURITY
     }
 
     DokanFileInfo->IsDirectory = FALSE;
-
-    PHYSFS_File * file = PHYSFS_openRead(fname); if(!file) {
-        return PHYSFS_getLastErrorCode();
-    }
-
-    DokanFileInfo->Context = (intptr_t)file;
+    DokanFileInfo->Context = findex;
 
     return STATUS_SUCCESS;
 }
 
-static void DOKAN_CALLBACK zmCleanup(LPCWSTR FileName, PDOKAN_FILE_INFO DokanFileInfo) { return; }
-
-static void DOKAN_CALLBACK zmCloseFile(LPCWSTR FileName, PDOKAN_FILE_INFO DokanFileInfo) {
-    if(DokanFileInfo->IsDirectory) {
-    }
-    else {
-        auto file = (PHYSFS_File *)DokanFileInfo->Context; PHYSFS_close(file);
-    }
-}
+static void DOKAN_CALLBACK zmCloseFile(LPCWSTR FileName, PDOKAN_FILE_INFO DokanFileInfo) {}
 
 static NTSTATUS DOKAN_CALLBACK zmReadFile(LPCWSTR FileName, LPVOID Buffer, DWORD BufferLength, LPDWORD ReadLength, LONGLONG Offset, PDOKAN_FILE_INFO DokanFileInfo) {
-    auto file = (PHYSFS_File *)DokanFileInfo->Context; if(!file) {
-        return STATUS_INVALID_PARAMETER;
+    int findex = DokanFileInfo->Context; {
+        if(!findex) return STATUS_INVALID_PARAMETER;
     }
 
-    if(Offset) {
-        auto rc = PHYSFS_seek(file, Offset); if(rc == 0) {
-            return PHYSFS_getLastErrorCode();
-        }
-    }
+    auto s = $archive.read(findex);
 
-    auto read = PHYSFS_read(file, Buffer, 1, BufferLength); if(read == -1) {
-        return PHYSFS_getLastErrorCode();
-    }
+    auto size = s->size();
+    auto toread = std::min(size - Offset, (size_t)BufferLength);
 
-    *ReadLength = read; return STATUS_SUCCESS;
+    memcpy(Buffer, s->data() + Offset, toread);
+
+    *ReadLength = toread; return STATUS_SUCCESS;
+}
+
+FILETIME time64_to_filetime(__time64_t t) {
+    ULARGE_INTEGER time_value; FILETIME ft;
+    // FILETIME represents time in 100-nanosecond intervals since January 1, 1601 (UTC).
+    // _time64_t represents seconds since January 1, 1970 (UTC).
+    // The difference in seconds is 11644473600.
+    // Multiply by 10,000,000 to convert seconds to 100-nanosecond intervals.
+    time_value.QuadPart = (t * 10000000LL) + 116444736000000000LL;
+
+    ft.dwLowDateTime = time_value.LowPart; ft.dwHighDateTime = time_value.HighPart;
+
+    return ft;
 }
 
 static NTSTATUS DOKAN_CALLBACK zmGetFileInformation(LPCWSTR FileName, LPBY_HANDLE_FILE_INFORMATION HandleFileInformation, PDOKAN_FILE_INFO DokanFileInfo) {
@@ -121,28 +271,24 @@ static NTSTATUS DOKAN_CALLBACK zmGetFileInformation(LPCWSTR FileName, LPBY_HANDL
         HandleFileInformation->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY; return STATUS_SUCCESS;
     }
 
-    auto file = (PHYSFS_File *)DokanFileInfo->Context; if(!file) {
+    int findex = DokanFileInfo->Context; if(!findex) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    USES_CONVERSION;
+    auto stat = $archive.stat(findex); {
+        FILETIME mtime = time64_to_filetime(stat.mtime);
 
-    auto fpath = W2A(path(FileName).generic_wstring().c_str());
-
-    PHYSFS_Stat stat; if(!PHYSFS_stat(fpath, &stat)) {
-        return PHYSFS_getLastErrorCode();
+        HandleFileInformation->dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+        HandleFileInformation->nFileSizeLow = stat.size;
+        HandleFileInformation->nFileSizeHigh = stat.size >> 32;
+        HandleFileInformation->ftCreationTime = mtime;
+        HandleFileInformation->ftLastWriteTime = mtime;
+        HandleFileInformation->ftLastAccessTime = mtime;
+        HandleFileInformation->nNumberOfLinks = 0;
+        HandleFileInformation->nFileIndexHigh = 0;
+        HandleFileInformation->nFileIndexLow = 0;
+        HandleFileInformation->dwVolumeSerialNumber = 0;
     }
-
-    HandleFileInformation->dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
-    HandleFileInformation->nFileSizeLow = stat.filesize;
-    HandleFileInformation->nFileSizeHigh = stat.filesize >> 32;
-    HandleFileInformation->ftCreationTime = (FILETIME)stat.createtime;
-    HandleFileInformation->ftLastWriteTime = (FILETIME)stat.modtime;
-    HandleFileInformation->ftLastAccessTime = (FILETIME)stat.accesstime;
-    HandleFileInformation->nNumberOfLinks = 0;
-    HandleFileInformation->nFileIndexHigh = 0;
-    HandleFileInformation->nFileIndexLow = 0;
-    HandleFileInformation->dwVolumeSerialNumber = 0;
 
     return STATUS_SUCCESS;
 }
@@ -152,44 +298,29 @@ static NTSTATUS DOKAN_CALLBACK zmFindFiles(LPCWSTR FileName, PFillFindData FillF
 
     auto dname = W2A(path(FileName).generic_wstring().c_str());
 
-    auto params = std::make_pair(FillFindData, DokanFileInfo);
+    $archive.each(dname, [&](auto const & stat) {
+        WIN32_FIND_DATAW find_data {0}; if(stat.is_dir()) {
+            find_data.dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+        }
+        else {
+            auto fpath = W2A((path(dname) / stat.fpath).generic_wstring().c_str());
+            auto ftime = time64_to_filetime(stat.mtime);
 
-    PHYSFS_enumerate(
-        dname, [](void * userp, const char * dname, const char * fname, int isdir) -> PHYSFS_EnumerateCallbackResult {
-            USES_CONVERSION;
+            find_data.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+            find_data.nFileSizeLow = stat.size;
+            find_data.nFileSizeHigh = stat.size >> 32;
+            find_data.ftCreationTime = ftime;
+            find_data.ftLastWriteTime = ftime;
+            find_data.ftLastAccessTime = ftime;
+        }
 
-            auto ctx = (std::pair<PFillFindData, PDOKAN_FILE_INFO> *)userp;
+        wcscpy(find_data.cFileName, A2W(stat.fpath.c_str()));
 
-            auto FillFindData = ctx->first; auto DokanFileInfo = ctx->second;
-
-            WIN32_FIND_DATAW find_data {0}; if(isdir) {
-                find_data.dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
-            }
-            else {
-                auto fpath = W2A((path(dname) / fname).generic_wstring().c_str());
-
-                PHYSFS_Stat stat; PHYSFS_stat(fpath, &stat);
-
-                find_data.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
-                find_data.nFileSizeLow = stat.filesize;
-                find_data.nFileSizeHigh = stat.filesize >> 32;
-                find_data.ftCreationTime = (FILETIME)stat.createtime;
-                find_data.ftLastWriteTime = (FILETIME)stat.modtime;
-                find_data.ftLastAccessTime = (FILETIME)stat.accesstime;
-            }
-
-            wcscpy(find_data.cFileName, A2W(fname));
-
-            FillFindData(&find_data, DokanFileInfo);
-
-            return PHYSFS_ENUM_OK;
-        }, &params);
+        FillFindData(&find_data, DokanFileInfo);
+    });
 
     return STATUS_SUCCESS;
 }
-
-static PHYSFS_Allocator physfs_allocator =
-    {0, 0, mi_malloc, mi_realloc, mi_free};
 
 struct zipmount_options {
     string archive_fname; optional<string> mount_point {"m:\\"};
@@ -206,9 +337,7 @@ int main(int argc, char ** argv) {
 
         ok(format("locate archive file '{}'", options.archive_fname)) = fs::exists(options.archive_fname);
 
-        ok = PHYSFS_setAllocator(&physfs_allocator);
-        ok("init physfs") = PHYSFS_init(APP_NAME);
-        ok(format("mount archive '{}' to '/'", options.archive_fname)) = PHYSFS_mount(options.archive_fname.c_str(), "/", 1);
+        ok(format("mount archive '{}'", options.archive_fname)) = $archive.open(options.archive_fname);
 
         mount_point = A2W(options.mount_point.value().c_str());
 
@@ -238,7 +367,6 @@ int main(int argc, char ** argv) {
 
         DOKAN_OPERATIONS dokanOperations {0}; {
             dokanOperations.ZwCreateFile = zmCreateFile;
-            dokanOperations.Cleanup = zmCleanup;
             dokanOperations.CloseFile = zmCloseFile;
             dokanOperations.ReadFile = zmReadFile;
             dokanOperations.GetFileInformation = zmGetFileInformation;

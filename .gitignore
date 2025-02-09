@@ -5,6 +5,7 @@
 .vscode/
 .vs/
 .fetch/
+backup/
 build/
 debug/
 release/
@@ -13,3 +14,4 @@ deps/
 logs/
 temp/
 physfs/
+miniz/
