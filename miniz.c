@@ -4406,6 +4406,90 @@ static mz_bool mz_zip_locate_file_binary_search(mz_zip_archive *pZip, const char
     return mz_zip_set_error(pZip, MZ_ZIP_FILE_NOT_FOUND);
 }
 
+//
+static MZ_FORCEINLINE int mz_zip_dirname_compare(const mz_zip_array *pCentral_dir_array, const mz_zip_array *pCentral_dir_offsets, mz_uint l_index, const char *pR, mz_uint r_len)
+{
+    const mz_uint8 *pL = &MZ_ZIP_ARRAY_ELEMENT(pCentral_dir_array, mz_uint8, MZ_ZIP_ARRAY_ELEMENT(pCentral_dir_offsets, mz_uint32, l_index)), *pE;
+    mz_uint l_len = MZ_READ_LE16(pL + MZ_ZIP_CDH_FILENAME_LEN_OFS);
+    mz_uint8 l = 0, r = 0;
+    pL += MZ_ZIP_CENTRAL_DIR_HEADER_SIZE;
+    
+    if(l_len < r_len) return -1;
+    
+    return strncmp((const char *)pL, pR, r_len); 
+
+
+    
+    // pE = pL + MZ_MIN(l_len, r_len);
+    
+    
+    
+    // while (pL < pE)
+    // {
+    //     if ((l = MZ_TOLOWER(*pL)) != (r = MZ_TOLOWER(*pR)))
+    //         break;
+    //     pL++;
+    //     pR++;
+    // }
+    // return (pL == pE) ? (int)(l_len - r_len) : (l - r);
+}
+
+static mz_uint32 mz_zip_locate_dir_binary_search(mz_zip_archive *pZip, const char *pFilename)
+{
+    mz_zip_internal_state *pState = pZip->m_pState;
+    const mz_zip_array *pCentral_dir_offsets = &pState->m_central_dir_offsets;
+    const mz_zip_array *pCentral_dir = &pState->m_central_dir;
+    mz_uint32 *pIndices = &MZ_ZIP_ARRAY_ELEMENT(&pState->m_sorted_central_dir_offsets, mz_uint32, 0);
+    const mz_uint32 size = pZip->m_total_files;
+    const mz_uint filename_len = (mz_uint)strlen(pFilename);
+
+    if (size)
+    {
+        /* yes I could use uint32_t's, but then we would have to add some special case checks in the loop, argh, and */
+        /* honestly the major expense here on 32-bit CPU's will still be the filename compare */
+        mz_int64 l = 0, h = (mz_int64)size - 1;
+
+        while (l <= h)
+        {
+            mz_int64 m = l + ((h - l) >> 1);
+            mz_uint32 file_index = pIndices[(mz_uint32)m];
+
+            int comp = mz_zip_dirname_compare(pCentral_dir, pCentral_dir_offsets, file_index, pFilename, filename_len);
+            if (!comp)
+            {
+                return file_index;
+            }
+            else if (comp < 0)
+                l = m + 1;
+            else
+                h = m - 1;
+        }
+    }
+
+    return -1;
+}
+
+int mz_zip_reader_locate_dir(mz_zip_archive *pZip, const char *pName, const char *pComment, mz_uint flags)
+{
+    mz_uint file_index;
+    size_t name_len, comment_len;
+
+    mz_uint32 index; mz_uint32 * pIndex = &index;
+
+    if ((!pZip) || (!pZip->m_pState) || (!pName)) return -1;
+
+
+    /* See if we can use a binary search */
+    if (((pZip->m_pState->m_init_flags & MZ_ZIP_FLAG_DO_NOT_SORT_CENTRAL_DIRECTORY) == 0) &&
+        (pZip->m_zip_mode == MZ_ZIP_MODE_READING) &&
+        ((flags & (MZ_ZIP_FLAG_IGNORE_PATH | MZ_ZIP_FLAG_CASE_SENSITIVE)) == 0) && (!pComment) && (pZip->m_pState->m_sorted_central_dir_offsets.m_size))
+    {
+        return mz_zip_locate_dir_binary_search(pZip, pName);
+    }
+
+    assert(FALSE); return -1;
+}
+
 int mz_zip_reader_locate_file(mz_zip_archive *pZip, const char *pName, const char *pComment, mz_uint flags)
 {
     mz_uint32 index;

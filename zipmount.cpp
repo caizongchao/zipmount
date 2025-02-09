@@ -85,21 +85,23 @@ const char * APP_VERSION = "0.1.0";
 using namespace std; using namespace ATL; namespace fs = filesystem; using fs::path;
 
 static struct ok_type {
-    void failed(int rc = 1) { print("failed\n"); exit(rc); }
+    bool epilogue {false};
 
-    void succeeded() { print("ok\n"); }
+    void failed(int rc = 1) { if(epilogue) { print("failed\n"); epilogue = false; } exit(rc); }
 
-    template<typename T, std::enable_if_t<!std::is_same_v<T, bool>, int> = 0>
+    void succeeded() { if(epilogue) { print("ok\n"); epilogue = false; } }
+
     ok_type & operator=(int rc) {
         if(rc) failed(rc); else succeeded(); ; return *this;
     }
 
-    ok_type & operator=(bool b) {
+    template<typename T, std::enable_if_t<std::is_same_v<T, bool>, int> = 0>
+    ok_type & operator=(T b) {
         if(!b) failed(); else succeeded(); ; return *this;
     }
 
     template<typename T>
-    ok_type & operator()(T && s) { print("{} ... ", s); return *this; }
+    ok_type & operator()(T && s) { epilogue = true; print("{} ... ", s); return *this; }
 } ok;
 
 static struct {
@@ -112,7 +114,7 @@ static struct {
 
         bool is_file() const { return type == FILE; }
 
-        bool is_idr() const { return type == DIR; }
+        bool is_dir() const { return type == DIR; }
     };
 
     struct stat_t {
@@ -125,6 +127,10 @@ static struct {
 
     mz_zip_archive zipf {0}; size_t size {0}; lru_cache<int, std::string> cache {128}; CAtlFileMappingBase fmapping;
 
+    string canonicalize(LPCWSTR FileName) {
+        USES_CONVERSION; auto ws = W2A(path(FileName).generic_wstring().c_str()); return ws[0] == '/' ? ++ws : ws;
+    }
+
     int open(string const & fname) {
         CAtlFile f; {
             ok(format("open {}", fname)) =
@@ -133,9 +139,11 @@ static struct {
         }
 
         ok("loading archive") =
-            mz_zip_reader_init_mem(&zipf, fmapping.GetData(), fmapping.GetMappingSize(), 0);
+            (mz_zip_reader_init_mem(&zipf, fmapping.GetData(), fmapping.GetMappingSize(), 0) == MZ_TRUE);
 
         size = mz_zip_reader_get_num_files(&zipf);
+
+        return 0;
     }
 
     stat_t stat(int findex) {
@@ -149,8 +157,28 @@ static struct {
     }
 
     entry_t locate(string const & fname) {
-        auto index = mz_zip_reader_locate_file(&zipf, fname.c_str(), 0, 0); {
-            if(index < 0) return {};
+        if(fname.empty() || fname == "/") return {DIR, -1};
+
+        auto index = mz_zip_reader_locate_file(&zipf, fname.c_str(), 0, 0); if(index < 0) {
+            string dname = fname + '/';
+
+            index = mz_zip_reader_locate_file(&zipf, dname.c_str(), 0, 0); {
+                if(!(index < 0)) return {DIR, index};
+
+                index = mz_zip_reader_locate_dir(&zipf, dname.c_str(), 0, 0); {
+                    if(!(index < 0)) {
+                        while(!(--index < 0)) {
+                            auto st = stat(index); {
+                                if(!st.fpath.starts_with(dname)) break;
+                            }
+                        }
+                        
+                        return {DIR, index};
+                    }
+                }
+            }
+
+            return {};
         }
 
         return {stat(index).type, index};
@@ -174,23 +202,45 @@ static struct {
 
     template<typename F>
     void each(string const & fname, F && f) {
-        auto [_, findex] = locate(fname); if(findex >= 0) {
-            while(findex < this->size) {
-                auto st = stat(findex++);
+        auto ent = locate(fname); if(ent.is_dir()) {
+            auto findex = ent.index; auto is_root = (findex == -1);
 
-                string & fpath = st.fpath;
+            stat_t st; scan: while(++findex < this->size) {
+                st = stat(findex); string & fpath = st.fpath;
 
-                if(fpath.starts_with(fname)) return;
+                if(!is_root && !fpath.starts_with(fname)) return;
 
-                auto offset = fname.size(); if(fpath[offset] == '/') {
+                auto offset = is_root ? 0 : fname.size(); if(fpath[offset] == '/') {
                     ++offset;
                 }
 
-                if(fpath.find('/', offset) != string::npos) return;
+                if(auto pos = fpath.find('/', offset); pos != string::npos) {
+                    // dir found
+                    string_view dname {fpath.data() + offset, pos - offset};
 
-                st.fpath = st.fpath.substr(offset);
+                    {
+                        stat_t st2; {
+                            st2.fpath = dname; st2.size = 0; st2.mtime = 0; st2.type = DIR;
+                        }
 
-                f(st);
+                        f(st2);
+                    }
+
+                    // skip this dir
+                    dname = {fpath.data(), offset + dname.size() + 1};
+
+                    while(++findex < this->size) {
+                        auto st2 = stat(findex); {
+                            if(st2.fpath.starts_with(dname)) continue;
+                        }
+
+                        goto scan;
+                    }
+
+                    return;
+                }
+
+                st.fpath = st.fpath.substr(offset); f(st);
             }
         }
     }
@@ -206,7 +256,7 @@ static NTSTATUS DOKAN_CALLBACK zmCreateFile(LPCWSTR FileName, PDOKAN_IO_SECURITY
 
     USES_CONVERSION;
 
-    string fpath = W2A(path(FileName).generic_wstring().c_str());
+    string fpath = $archive.canonicalize(FileName);
 
     auto [ftype, findex] = $archive.locate(fpath);
 
@@ -222,6 +272,8 @@ static NTSTATUS DOKAN_CALLBACK zmCreateFile(LPCWSTR FileName, PDOKAN_IO_SECURITY
         return DokanNtStatusFromWin32(ERROR_FILE_EXISTS);
     }
 
+    DokanFileInfo->Context = findex;
+
     bool is_dir = (ftype == 2); if(is_dir) {
         DokanFileInfo->IsDirectory = TRUE;
 
@@ -231,7 +283,6 @@ static NTSTATUS DOKAN_CALLBACK zmCreateFile(LPCWSTR FileName, PDOKAN_IO_SECURITY
     }
 
     DokanFileInfo->IsDirectory = FALSE;
-    DokanFileInfo->Context = findex;
 
     return STATUS_SUCCESS;
 }
@@ -296,7 +347,7 @@ static NTSTATUS DOKAN_CALLBACK zmGetFileInformation(LPCWSTR FileName, LPBY_HANDL
 static NTSTATUS DOKAN_CALLBACK zmFindFiles(LPCWSTR FileName, PFillFindData FillFindData, PDOKAN_FILE_INFO DokanFileInfo) {
     USES_CONVERSION;
 
-    auto dname = W2A(path(FileName).generic_wstring().c_str());
+    auto dname = $archive.canonicalize(FileName);
 
     $archive.each(dname, [&](auto const & stat) {
         WIN32_FIND_DATAW find_data {0}; if(stat.is_dir()) {
@@ -335,9 +386,43 @@ int main(int argc, char ** argv) {
         // Line of code that does all the work:
         auto options = structopt::app(APP_NAME, APP_VERSION).parse<zipmount_options>(argc, argv);
 
-        ok(format("locate archive file '{}'", options.archive_fname)) = fs::exists(options.archive_fname);
+        ok(format("locate archive file '{}'", options.archive_fname)) =
+            fs::exists(options.archive_fname);
 
-        ok(format("mount archive '{}'", options.archive_fname)) = $archive.open(options.archive_fname);
+        ok(format("mount archive '{}'", options.archive_fname)) =
+            $archive.open(options.archive_fname);
+
+#if 0
+        {
+            string fname = "/";
+
+            auto ent = $archive.locate(fname); if(ent.is_dir()) {
+                auto findex = ent.index; auto is_root = (findex == -1);
+
+                while(++findex < $archive.size) {
+                    auto st = $archive.stat(findex);
+
+                    print("{}", st.fpath);
+
+                    // string & fpath = st.fpath;
+
+                    // if(!is_root && !fpath.starts_with(fname)) continue;
+
+                    // auto offset = is_root ? 0 : fname.size(); if(fpath[offset] == '/') {
+                    //     ++offset;
+                    // }
+
+                    // if(fpath.find('/', offset) != string::npos) continue;
+
+                    // st.fpath = st.fpath.substr(offset);
+
+                    continue;
+                }
+            }
+
+            exit(0);
+        }
+#endif
 
         mount_point = A2W(options.mount_point.value().c_str());
 

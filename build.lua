@@ -24,33 +24,17 @@ local cc = ninja.target('cc')
     })
     :c_flags(public { std = 'c11' })
     :cx_flags(public { '/arch:AVX', '/Z7', '/GS-', debug and '/Od' or '/O2' })
-    :cx_flags(public { '-Wno-unused-value', '-Wno-microsoft-cast', '-Wno-int-to-pointer-cast', '-Wno-invalid-noreturn' })
+    :cx_flags(public { '-Wno-unused-value', '-Wno-microsoft-cast', '-Wno-int-to-pointer-cast', '-Wno-invalid-noreturn', '-Wno-microsoft-exception-spec' })
     :cxx_flags(public { std = 'c++latest', '/EHsc' })
     :ld_flags(public { '/DEBUG', '/OPT:REF' })
     :include_dir(public { 'include', 'w:/projects/mimalloc/deps/mimalloc/include' })
     :lib_dir(public { 'w:/projects/mimalloc/release' })
     :lib(public { 'mimalloc.lib', 'advapi32.lib', 'user32.lib', 'shell32.lib' })
 
-local libphysfs = ninja.target('libphysfs')
-    :type('static')
-    :deps(cc)
-    :define(public { 'PHYSFS_STATIC', 'PHYSFS_SUPPORTS_ZIP=1' })
-    :include_dir(public { 'physfs/src', 'physfs/extras' })
-    :src(files_in { 'physfs/src',
-        'physfs.c',
-        'physfs_byteorder.c',
-        'physfs_unicode.c',
-        'physfs_platform_windows.c',
-        'physfs_archiver_dir.c',
-        'physfs_archiver_zip.c',
-    })
-    :src(files_in { 'physfs/extras', 'globbing.c', 'ignorecase.c' })
-
 local zipmount = ninja.target('zipmount')
     :type('binary')
-    :deps(libphysfs)
+    :deps(cc)
     :cxx_pch('stdafx.h')
-    :define('malloc=mi_malloc', 'free=mi_free', 'realloc=mi_realloc')
     :define('_ATL_NO_COM_SUPPORT'):include_dir('atl/include'):lib_dir('atl/lib/x64')
     :include_dir('dokan/include/dokan'):lib_dir('dokan/lib'):lib('dokan2.lib')
     :src('miniz.c')
