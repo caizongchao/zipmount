@@ -216,13 +216,12 @@ static struct {
             stat_t st; scan: while(findex < this->size) {
                 st = stat(findex++); string & fpath = st.fpath;
 
-                if(!is_root && !fpath.starts_with(fname)) return;
+                size_t offset = fname.size(); if(!is_root) {
+                    if(!fpath.starts_with(fname)) return;
+                    if(fpath[offset] != '/') return;
 
-                auto offset = is_root ? 0 : fname.size();
-
-                if(fpath[offset] != '/') return;
-
-                ++offset;
+                    ++offset;
+                }
 
                 if(auto pos = fpath.find('/', offset); pos != string::npos) {
                     // dir found
