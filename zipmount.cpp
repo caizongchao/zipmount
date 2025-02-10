@@ -206,9 +206,6 @@ static struct {
 
     template<typename F>
     void each(string const & fname, F && f) {
-        // if(fname.contains("Core/Public/IO")) {
-        //     int i = 0;
-        // }
         auto ent = locate(fname); if(ent.is_dir()) {
             auto findex = ent.index;
 
@@ -220,10 +217,6 @@ static struct {
                 st = stat(findex++); string & fpath = st.fpath;
 
                 if(!is_root && !fpath.starts_with(fname)) return;
-
-                // auto offset = is_root ? 0 : fname.size(); if(fpath[offset] == '/') {
-                //     ++offset;
-                // }
 
                 auto offset = is_root ? 0 : fname.size();
 
@@ -401,7 +394,7 @@ int main(int argc, char ** argv) {
         // Line of code that does all the work:
         auto options = structopt::app(APP_NAME, APP_VERSION).parse<zipmount_options>(argc, argv);
 
-        ok(format("check file existance of archive '{}'", options.archive_fname)) =
+        ok(format("check file '{}'", options.archive_fname)) =
             fs::exists(options.archive_fname);
 
         ok(format("open archive '{}'", options.archive_fname)) =
