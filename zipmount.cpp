@@ -87,9 +87,9 @@ using namespace std; using namespace ATL; namespace fs = filesystem; using fs::p
 static struct ok_type {
     bool epilogue {false};
 
-    void failed(int rc = 1) { if(epilogue) { print("failed\n"); epilogue = false; } exit(rc); }
+    void failed(int rc = 1) { if(epilogue) { print("\n"); epilogue = false; } exit(rc); }
 
-    void succeeded() { if(epilogue) { print("ok\n"); epilogue = false; } }
+    void succeeded() { if(epilogue) { print("\n"); epilogue = false; } }
 
     ok_type & operator=(int rc) {
         if(rc) failed(rc); else succeeded(); ; return *this;
@@ -106,7 +106,7 @@ static struct ok_type {
         auto time_point = std::chrono::floor<std::chrono::seconds>(now);
         auto time_of_day = std::chrono::hh_mm_ss {time_point - std::chrono::floor<std::chrono::days>(time_point)};
 
-        epilogue = true; print("[{:%T}] {} ... ", time_of_day, s); return *this;
+        epilogue = true; print("[{:%T}] {}", time_of_day, s); return *this;
     }
 } ok;
 
@@ -139,13 +139,11 @@ static struct {
 
     int open(string const & fname) {
         CAtlFile f; {
-            ok(format("open {}", fname)) =
-                f.Create(fname.c_str(), GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL);
+            ok = f.Create(fname.c_str(), GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL);
             ok = fmapping.MapFile(f);
         }
 
-        ok("loading archive") =
-            (mz_zip_reader_init_mem(&zipf, fmapping.GetData(), fmapping.GetMappingSize(), 0) == MZ_TRUE);
+        ok = (mz_zip_reader_init_mem(&zipf, fmapping.GetData(), fmapping.GetMappingSize(), 0) == MZ_TRUE);
 
         size = mz_zip_reader_get_num_files(&zipf);
 
@@ -208,6 +206,9 @@ static struct {
 
     template<typename F>
     void each(string const & fname, F && f) {
+        // if(fname.contains("Core/Public/IO")) {
+        //     int i = 0;
+        // }
         auto ent = locate(fname); if(ent.is_dir()) {
             auto findex = ent.index;
 
@@ -220,9 +221,15 @@ static struct {
 
                 if(!is_root && !fpath.starts_with(fname)) return;
 
-                auto offset = is_root ? 0 : fname.size(); if(fpath[offset] == '/') {
-                    ++offset;
-                }
+                // auto offset = is_root ? 0 : fname.size(); if(fpath[offset] == '/') {
+                //     ++offset;
+                // }
+
+                auto offset = is_root ? 0 : fname.size();
+
+                if(fpath[offset] != '/') return;
+
+                ++offset;
 
                 if(auto pos = fpath.find('/', offset); pos != string::npos) {
                     // dir found
@@ -240,8 +247,10 @@ static struct {
                     dname = {fpath.data(), offset + dname.size() + 1};
 
                     while(findex < this->size) {
-                        auto st2 = stat(findex++); {
-                            if(st2.fpath.starts_with(dname)) continue;
+                        auto st2 = stat(findex); {
+                            if(st2.fpath.starts_with(dname)) {
+                                ++findex; continue;
+                            }
                         }
 
                         goto scan;
@@ -392,10 +401,10 @@ int main(int argc, char ** argv) {
         // Line of code that does all the work:
         auto options = structopt::app(APP_NAME, APP_VERSION).parse<zipmount_options>(argc, argv);
 
-        ok(format("locate archive file '{}'", options.archive_fname)) =
+        ok(format("check file existance of archive '{}'", options.archive_fname)) =
             fs::exists(options.archive_fname);
 
-        ok(format("mount archive '{}'", options.archive_fname)) =
+        ok(format("open archive '{}'", options.archive_fname)) =
             $archive.open(options.archive_fname);
 
 #if 0
@@ -406,7 +415,7 @@ int main(int argc, char ** argv) {
                 auto findex = ent.index; auto is_root = (findex == -1);
 
                 while(++findex < $archive.size) {
-                    auto st = $archive.stat(findex); print("{}", st.fpath); continue;
+                    auto st = $archive.stat(findex); print("{}\n", st.fpath); continue;
                 }
             }
 
