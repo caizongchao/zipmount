@@ -87,7 +87,7 @@ using namespace std; using namespace ATL; namespace fs = filesystem; using fs::p
 static struct ok_type {
     bool epilogue {false};
 
-    void failed(int rc = 1) { if(epilogue) { print("\n"); epilogue = false; } exit(rc); }
+    void failed(int rc = 1) { if(epilogue) { print("failed\n"); epilogue = false; } exit(rc); }
 
     void succeeded() { if(epilogue) { print("\n"); epilogue = false; } }
 
@@ -393,10 +393,10 @@ int main(int argc, char ** argv) {
         // Line of code that does all the work:
         auto options = structopt::app(APP_NAME, APP_VERSION).parse<zipmount_options>(argc, argv);
 
-        ok(format("check file '{}'", options.archive_fname)) =
+        ok(format("check {}", options.archive_fname)) =
             fs::exists(options.archive_fname);
 
-        ok(format("open archive '{}'", options.archive_fname)) =
+        ok(format("open  {}", options.archive_fname)) =
             $archive.open(options.archive_fname);
 
 #if 0
