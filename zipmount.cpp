@@ -1,4 +1,3 @@
-#include "miniz.h"
 #include "stdafx.h"
 #include <algorithm>
 
